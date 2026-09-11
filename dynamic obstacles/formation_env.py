@@ -1,0 +1,498 @@
+# formation_env.py
+import gymnasium as gym
+from gymnasium import spaces
+import numpy as np
+import matplotlib
+from collections import deque
+import os
+import math
+
+matplotlib.use('Agg')
+import matplotlib.pyplot as plt
+
+plt.rcParams['font.sans-serif'] = ['SimHei']
+plt.rcParams['axes.unicode_minus'] = False
+plt.rcParams['font.size'] = 18
+
+
+class MultiUAVGymEnv(gym.Env):
+    def __init__(self, world_size=1000, step_size=15.0, max_steps=600,
+                 sensor_range=200.0):
+        super().__init__()
+        self.world_size = world_size
+        self.step_size = step_size
+        self.max_steps = max_steps
+        self.sensor_range = sensor_range
+        self.num_uavs = 3  # 3架无人机
+        self.formation_distance = 30.0  # 等边三角形边长
+        self.center_point = np.array([200, 200], dtype=np.float32)  # 红色固定点
+        self.center_velocity = np.array([5.0, 5.0], dtype=np.float32)  # 中心点移动速度 (东北方向)
+        self.target_center = np.array([801.03906, 801.03906], dtype=np.float32)  # 目标中心点
+        self.initial_formation_reached = False  # 是否到达初始理想位置标志
+        self.formation_reached_step = None  # 记录队形形成的时间步
+
+        # 动态障碍物设置 - 在路径必经之处
+        self.obstacle_positions = np.array([
+            [580, 450],  # 障碍物1初始位置
+            [230, 400],  # 障碍物2初始位置
+            [630, 630]  # 障碍物3初始位置
+        ], dtype=np.float32)
+
+        # 障碍物速度向量
+        self.obstacle_velocities = np.array([
+            [2.5, 2.5],
+            [-2.0, 2.0],
+            [3.0, -1.5]
+        ], dtype=np.float32)
+
+        # 定义障碍物运动区域
+        self.obstacle_areas = [
+            [530, 400, 630, 500],
+            [180, 350, 280, 450],
+            [580, 580, 680, 680]
+        ]
+
+        self.obstacle_radius = 20.0
+        self.obstacle_penalty_coef = 1.0
+        self.safe_distance = 30.0
+
+        self.ideal_positions = self._calculate_ideal_positions()
+
+        # 轨迹记录
+        self.trajectories = None
+        self.full_trajectories = None
+        # [新增] 障碍物轨迹记录
+        self.obstacle_paths = None
+
+        self.prev_dist_to_obstacle = None
+        self.previous_actions = None
+
+        self.action_space = spaces.Box(low=-0.3, high=0.3, shape=(2,), dtype=np.float32)
+
+        # 观测空间
+        self.observation_space = spaces.Box(
+            low=-world_size, high=world_size,
+            shape=(7,), dtype=np.float32
+        )
+
+        # 全局状态空间
+        self.state_space = spaces.Box(
+            low=-world_size, high=world_size,
+            shape=(self.num_uavs * 2 + 2 + 2 * len(self.obstacle_positions),), dtype=np.float32
+        )
+
+        self.uav_positions = None
+        self.current_step = 0
+
+    def _calculate_ideal_positions(self):
+        angle0 = math.pi / 4
+        x0 = self.center_point[0] + 100 * math.cos(angle0)
+        y0 = self.center_point[1] + 100 * math.sin(angle0)
+
+        angle1 = angle0 + 2 * math.pi / 3
+        angle2 = angle0 + 4 * math.pi / 3
+
+        x1 = self.center_point[0] + 100 * math.cos(angle1)
+        y1 = self.center_point[1] + 100 * math.sin(angle1)
+        x2 = self.center_point[0] + 100 * math.cos(angle2)
+        y2 = self.center_point[1] + 100 * math.sin(angle2)
+
+        return np.array([[x0, y0], [x1, y1], [x2, y2]], dtype=np.float32)
+
+    def _update_dynamic_obstacles(self):
+        for i in range(len(self.obstacle_positions)):
+            new_pos = self.obstacle_positions[i] + self.obstacle_velocities[i]
+            min_x, min_y, max_x, max_y = self.obstacle_areas[i]
+
+            if new_pos[0] < min_x:
+                new_pos[0] = min_x
+                self.obstacle_velocities[i][0] = -self.obstacle_velocities[i][0]
+            elif new_pos[0] > max_x:
+                new_pos[0] = max_x
+                self.obstacle_velocities[i][0] = -self.obstacle_velocities[i][0]
+
+            if new_pos[1] < min_y:
+                new_pos[1] = min_y
+                self.obstacle_velocities[i][1] = -self.obstacle_velocities[i][1]
+            elif new_pos[1] > max_y:
+                new_pos[1] = max_y
+                self.obstacle_velocities[i][1] = -self.obstacle_velocities[i][1]
+
+            self.obstacle_positions[i] = new_pos
+
+    def _get_nearest_obstacle_info(self, uav_position):
+        min_dist = float('inf')
+        nearest_obstacle = None
+
+        for obstacle_pos in self.obstacle_positions:
+            dist = np.linalg.norm(uav_position - obstacle_pos)
+            if dist < min_dist:
+                min_dist = dist
+                nearest_obstacle = obstacle_pos
+
+        return nearest_obstacle, min_dist
+
+    def reset(self, seed=None, options=None):
+        super().reset(seed=seed)
+        random_state = np.random.RandomState(seed)
+
+        self.center_point = np.array([200, 200], dtype=np.float32)
+        self.initial_formation_reached = False
+        self.formation_reached_step = None
+        self.previous_actions = np.zeros((self.num_uavs, 2), dtype=np.float32)
+
+        self.obstacle_positions = np.array([
+            [580, 450],
+            [230, 400],
+            [630, 630]
+        ], dtype=np.float32)
+
+        self.obstacle_velocities = np.array([
+            [2.5, 2.5],
+            [-2.0, 2.0],
+            [3.0, -1.5]
+        ], dtype=np.float32)
+
+        self.uav_positions = np.zeros((self.num_uavs, 2), dtype=np.float32)
+        for i in range(self.num_uavs):
+            angle = random_state.uniform(0, 2 * math.pi)
+            radius = random_state.uniform(0, 100)
+            self.uav_positions[i] = self.center_point + radius * np.array([math.cos(angle), math.sin(angle)])
+
+        self.ideal_positions = self._calculate_ideal_positions()
+
+        self.trajectories = [deque(maxlen=100) for _ in range(self.num_uavs)]
+        self.full_trajectories = [[] for _ in range(self.num_uavs)]
+
+        # [新增] 初始化障碍物轨迹列表
+        self.obstacle_paths = [[] for _ in range(len(self.obstacle_positions))]
+
+        for i, pos in enumerate(self.uav_positions):
+            self.trajectories[i].append(pos.copy())
+            self.full_trajectories[i].append(pos.copy())
+
+        # [新增] 记录障碍物初始位置
+        for i, pos in enumerate(self.obstacle_positions):
+            self.obstacle_paths[i].append(pos.copy())
+
+        self.prev_dist_to_obstacle = np.zeros(self.num_uavs)
+        for i in range(self.num_uavs):
+            _, min_dist = self._get_nearest_obstacle_info(self.uav_positions[i])
+            self.prev_dist_to_obstacle[i] = min_dist
+
+        self.current_step = 0
+        return self._get_obs(), self._get_state()
+
+    def step(self, actions):
+        self.current_step += 1
+
+        # 更新动态障碍物位置
+        self._update_dynamic_obstacles()
+
+        # [新增] 记录更新后的障碍物位置到轨迹中
+        for i, pos in enumerate(self.obstacle_positions):
+            self.obstacle_paths[i].append(pos.copy())
+
+        # 检查是否到达初始理想位置
+        if not self.initial_formation_reached:
+            threshold = 5.0
+            if all(
+                    np.linalg.norm(self.uav_positions[i] - self.ideal_positions[i]) < threshold
+                    for i in range(self.num_uavs)
+            ):
+                self.initial_formation_reached = True
+                self.formation_reached_step = self.current_step
+
+        if self.initial_formation_reached:
+            direction = self.target_center - self.center_point
+            norm_direction = direction / (np.linalg.norm(direction) + 1e-8)
+            self.center_point += self.center_velocity * norm_direction
+            self.center_point = np.clip(self.center_point, 0, self.world_size)
+            self.ideal_positions = self._calculate_ideal_positions()
+
+        # 移动无人机
+        for i in range(self.num_uavs):
+            direction_to_target = self.ideal_positions[i] - self.uav_positions[i]
+            norm_direction_to_target = direction_to_target / (np.linalg.norm(direction_to_target) + 1e-8)
+
+            nearest_obstacle, obstacle_dist = self._get_nearest_obstacle_info(self.uav_positions[i])
+            obstacle_direction = self.uav_positions[i] - nearest_obstacle
+            norm_obstacle_direction = obstacle_direction / (np.linalg.norm(obstacle_direction) + 1e-8)
+
+            if obstacle_dist < (self.obstacle_radius + self.safe_distance * 2):
+                obstacle_weight = max(0, 1.0 - obstacle_dist / (self.obstacle_radius + self.safe_distance * 2))
+                target_weight = 1.0 - obstacle_weight
+                mixed_direction = (target_weight * norm_direction_to_target +
+                                   obstacle_weight * norm_obstacle_direction)
+                norm_mixed_direction = mixed_direction / (np.linalg.norm(mixed_direction) + 1e-8)
+            else:
+                norm_mixed_direction = norm_direction_to_target
+
+            smooth_factor = 0.6
+            smoothed_action = (smooth_factor * self.previous_actions[i] +
+                               (1 - smooth_factor) * actions[i])
+
+            velocity = smoothed_action * self.step_size
+            self.uav_positions[i] += velocity * norm_mixed_direction
+            self.uav_positions[i] = np.clip(self.uav_positions[i], 0, self.world_size)
+            self.previous_actions[i] = smoothed_action.copy()
+
+        # 更新无人机轨迹
+        for i in range(self.num_uavs):
+            self.trajectories[i].append(self.uav_positions[i].copy())
+            self.full_trajectories[i].append(self.uav_positions[i].copy())
+
+        rewards, avoidance_rewards = self._calculate_rewards()
+
+        collisions = np.zeros(self.num_uavs)
+        for i in range(self.num_uavs):
+            _, min_dist = self._get_nearest_obstacle_info(self.uav_positions[i])
+            if min_dist < self.obstacle_radius:
+                collisions[i] = 1
+
+        center_reached = np.linalg.norm(self.center_point - self.target_center) < 1.0
+        terminated = center_reached
+        truncated = self.current_step >= self.max_steps
+
+        return self._get_obs(), self._get_state(), rewards, terminated, truncated, {
+            "avoidance_rewards": avoidance_rewards, "collisions": collisions}
+
+    def _get_obs(self):
+        obs = []
+        for i, pos in enumerate(self.uav_positions):
+            single_obs = list(pos)
+            single_obs.extend(pos - self.ideal_positions[i])
+            single_obs.append(i)
+            nearest_obstacle, _ = self._get_nearest_obstacle_info(pos)
+            obstacle_rel_pos = pos - nearest_obstacle
+            single_obs.extend(obstacle_rel_pos)
+            obs.append(np.array(single_obs, dtype=np.float32))
+        return obs
+
+    def _get_state(self):
+        state = []
+        for pos in self.uav_positions:
+            state.extend(pos)
+        state.extend(self.center_point)
+        for obstacle_pos in self.obstacle_positions:
+            state.extend(obstacle_pos)
+        return np.array(state, dtype=np.float32)
+
+    def _calculate_rewards(self):
+        rewards = np.zeros(self.num_uavs)
+        avoidance_rewards = np.zeros(self.num_uavs)
+
+        for i in range(self.num_uavs):
+            dist = np.linalg.norm(self.uav_positions[i] - self.ideal_positions[i])
+            rewards[i] = -dist * 0.1
+
+            _, curr_dist_to_obstacle = self._get_nearest_obstacle_info(self.uav_positions[i])
+            prev_dist = self.prev_dist_to_obstacle[i]
+
+            if curr_dist_to_obstacle < self.obstacle_radius:
+                collision_penalty = -100.0
+                rewards[i] += collision_penalty
+                avoidance_rewards[i] = collision_penalty
+                self.prev_dist_to_obstacle[i] = curr_dist_to_obstacle
+                continue
+
+            if curr_dist_to_obstacle < (self.obstacle_radius + self.safe_distance):
+                penalty = np.exp(-curr_dist_to_obstacle / 10) * self.obstacle_penalty_coef
+                rewards[i] -= penalty
+                avoidance_rewards[i] = -penalty
+
+            if curr_dist_to_obstacle < (self.obstacle_radius + self.safe_distance * 1.5):
+                if curr_dist_to_obstacle < prev_dist:
+                    penalty = (prev_dist - curr_dist_to_obstacle) * self.obstacle_penalty_coef
+                    rewards[i] -= penalty
+                    avoidance_rewards[i] = -penalty
+
+            self.prev_dist_to_obstacle[i] = curr_dist_to_obstacle
+
+        return rewards, avoidance_rewards
+
+    def get_trajectories(self):
+        return self.trajectories
+
+    def _smooth_trajectory(self, trajectory, window_size=10):
+        if len(trajectory) < window_size:
+            return trajectory
+        smoothed = []
+        for i in range(len(trajectory)):
+            start = max(0, i - window_size // 2)
+            end = min(len(trajectory), i + window_size // 2 + 1)
+            segment = trajectory[start:end]
+            avg_x = sum(p[0] for p in segment) / len(segment)
+            avg_y = sum(p[1] for p in segment) / len(segment)
+            smoothed.append([avg_x, avg_y])
+        return smoothed
+
+    def save_trajectory_image(self, episode, steps):
+        """保存轨迹图像 - 绘制障碍物历史轨迹以展示避障过程"""
+        plt.rcParams['font.family'] = 'Times New Roman'
+
+        plt.figure(figsize=(10, 10))
+        ax = plt.gca()
+        ax.set_xlim(0, self.world_size)
+        ax.set_ylim(0, self.world_size)
+        ax.tick_params(axis='both', which='major', labelsize=18)
+
+        # 绘制目标中心点
+        target_center_plot = ax.plot(self.target_center[0], self.target_center[1], 'go', ms=10, label='目标中心点')
+
+        obstacle_colors = ['red', 'orange', 'brown']
+        first_obstacle_handle = None
+
+        # 1. 绘制障碍物运动区域和最终位置
+        for idx, (obstacle_pos, area) in enumerate(zip(self.obstacle_positions, self.obstacle_areas)):
+            min_x, min_y, max_x, max_y = area
+            width = max_x - min_x
+            height = max_y - min_y
+            rect = plt.Rectangle((min_x, min_y), width, height,
+                                 fill=False, edgecolor=obstacle_colors[idx],
+                                 linestyle=':', linewidth=1, alpha=0.3,
+                                 label=f'Obs {idx + 1} Area')
+            ax.add_patch(rect)
+
+            # 绘制障碍物当前（最终）位置 - 实心
+            obstacle_circle = plt.Circle(
+                (obstacle_pos[0], obstacle_pos[1]),
+                self.obstacle_radius,
+                color=obstacle_colors[idx], alpha=0.6
+            )
+            ax.add_patch(obstacle_circle)
+            obstacle_plot = ax.plot(obstacle_pos[0], obstacle_pos[1], 'ro', ms=5, alpha=0.8)
+            if idx == 0:
+                first_obstacle_handle = obstacle_plot[0]
+
+
+            # [新增] 绘制障碍物轨迹 - 虚线
+            # 这显示了障碍物从初始位置到当前位置的路径
+            if self.obstacle_paths and len(self.obstacle_paths[idx]) > 1:
+                path = np.array(self.obstacle_paths[idx])
+                # 只绘制队形形成后的轨迹，或者绘制全轨迹但透明度降低
+                # 这里绘制全轨迹以显示整体运动趋势
+                ax.plot(path[:, 0], path[:, 1],
+                        color=obstacle_colors[idx], linestyle='--', linewidth=1.5, alpha=0.4)
+
+        # 绘制无人机
+        colors = ['blue', 'green', 'purple']
+        labels = ['Agent 0', 'Agent 1', 'Agent 2']
+        uav_plots = []
+
+        # 绘制无人机最终位置
+        for i in range(self.num_uavs):
+            uav_plot = ax.plot(self.uav_positions[i][0], self.uav_positions[i][1],
+                               color=colors[i], marker='o', ms=8, label=labels[i])
+            uav_plots.append(uav_plot[0])
+
+        # 绘制无人机轨迹
+        if self.formation_reached_step is not None:
+            for i in range(self.num_uavs):
+                if len(self.full_trajectories[i]) > self.formation_reached_step:
+                    formation_trajectory = self.full_trajectories[i][self.formation_reached_step:]
+                    if len(formation_trajectory) > 1:
+                        smooth_traj = self._smooth_trajectory(formation_trajectory)
+                        traj = np.array(smooth_traj)
+                        ax.plot(traj[:, 0], traj[:, 1],
+                                color=colors[i], linewidth=2, alpha=0.8)
+
+        # 绘制无人机之间的连线
+        for i in range(self.num_uavs):
+            for j in range(i + 1, self.num_uavs):
+                ax.plot(
+                    [self.uav_positions[i][0], self.uav_positions[j][0]],
+                    [self.uav_positions[i][1], self.uav_positions[j][1]],
+                    'b-', linewidth=2, alpha=0.5
+                )
+
+        all_legend_items = [target_center_plot[0], first_obstacle_handle] + uav_plots
+        all_legend_labels = ['Target', 'Obstacles'] + labels
+        ax.legend(all_legend_items, all_legend_labels, loc='lower right', fontsize=18)
+
+        ax.grid(True)
+        #ax.set_title(f'Episode {episode} - Step {steps}\n'
+                     #f'Obstacle Trails (Dashed) show movement history')
+
+        os.makedirs("image/evaluation", exist_ok=True)
+        plt.savefig(f"image/evaluation/min_step_episode_{episode}.jpg", dpi=300, bbox_inches='tight')
+        plt.close()
+
+    def render(self, mode='human', filename=None):
+        """可视化 - 增加障碍物轨迹绘制"""
+        plt.rcParams['font.family'] = 'Times New Roman'
+
+        fig, ax = plt.subplots(figsize=(10, 10))
+        ax.set_xlim(0, self.world_size)
+        ax.set_ylim(0, self.world_size)
+        ax.tick_params(axis='both', which='major', labelsize=18)
+
+        target_center_plot = ax.plot(self.target_center[0], self.target_center[1], 'go', ms=10, label='Target')
+
+        obstacle_colors = ['red', 'orange', 'brown']
+        first_obstacle_handle = None
+        for idx, (obstacle_pos, area) in enumerate(zip(self.obstacle_positions, self.obstacle_areas)):
+            min_x, min_y, max_x, max_y = area
+            width = max_x - min_x
+            height = max_y - min_y
+            rect = plt.Rectangle((min_x, min_y), width, height,
+                                 fill=False, edgecolor=obstacle_colors[idx],
+                                 linestyle=':', linewidth=1, alpha=0.3)
+            ax.add_patch(rect)
+
+            obstacle_circle = plt.Circle(
+                (obstacle_pos[0], obstacle_pos[1]),
+                self.obstacle_radius,
+                color=obstacle_colors[idx], alpha=0.6
+            )
+            ax.add_patch(obstacle_circle)
+            obstacle_plot = ax.plot(obstacle_pos[0], obstacle_pos[1], 'ro', ms=5, alpha=0.5)
+            if idx == 0:
+                first_obstacle_handle = obstacle_plot[0]
+
+            # [新增] 绘制障碍物历史轨迹
+            if self.obstacle_paths and len(self.obstacle_paths[idx]) > 1:
+                path = np.array(self.obstacle_paths[idx])
+                ax.plot(path[:, 0], path[:, 1],
+                        color=obstacle_colors[idx], linestyle='--', linewidth=1.5, alpha=0.4)
+
+        colors = ['blue', 'green', 'purple']
+        labels = ['Agent 0', 'Agent 1', 'Agent 2']
+        uav_plots = []
+        for i in range(self.num_uavs):
+            uav_plot = ax.plot(self.uav_positions[i][0], self.uav_positions[i][1],
+                               color=colors[i], marker='o', ms=8, label=labels[i])
+            uav_plots.append(uav_plot[0])
+
+        for i in range(self.num_uavs):
+            for j in range(i + 1, self.num_uavs):
+                ax.plot(
+                    [self.uav_positions[i][0], self.uav_positions[j][0]],
+                    [self.uav_positions[i][1], self.uav_positions[j][1]],
+                    'b-', linewidth=2, alpha=0.5
+                )
+
+        if self.formation_reached_step is not None:
+            for i in range(self.num_uavs):
+                if len(self.full_trajectories[i]) > self.formation_reached_step:
+                    formation_trajectory = self.full_trajectories[i][self.formation_reached_step:]
+                    if len(formation_trajectory) > 1:
+                        smooth_traj = self._smooth_trajectory(formation_trajectory)
+                        traj = np.array(smooth_traj)
+                        ax.plot(traj[:, 0], traj[:, 1],
+                                color=colors[i], linewidth=2, alpha=0.8)
+
+        all_legend_items = [target_center_plot[0], first_obstacle_handle] + uav_plots
+        all_legend_labels = ['Target', 'Obstacles'] + labels
+        ax.legend(all_legend_items, all_legend_labels, loc='lower right', fontsize=18)
+
+        #ax.set_title(
+            #f'Step {self.current_step}/{self.max_steps}, Formation: {"Reached" if self.initial_formation_reached else "Not Reached"}')
+        ax.grid(True)
+
+        if filename:
+            os.makedirs(os.path.dirname(filename), exist_ok=True)
+            plt.savefig(filename, dpi=300, bbox_inches='tight')
+            plt.close(fig)
+        elif mode == 'human':
+            plt.show()
