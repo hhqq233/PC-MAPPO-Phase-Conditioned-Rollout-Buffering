@@ -1,26 +1,44 @@
-# PC-MAPPO-Phased-Curriculum-Learning-for-Multi-Robot-Collaborative-Motion-Planning
-This repository contains the official source code for the paper **"PC-MAPPO: Phased Curriculum Learning for Multi-Robot Collaborative Motion Planning"**[cite: 2]. This project proposes a multi-agent reinforcement learning (MARL) framework equipped with a Phased Curriculum Episodic Rollout (PCER) mechanism, designed to solve decentralized collaborative formation and navigation tasks in environments containing static and dynamic obstacles.
-## Core Features
-* **PCER Mechanism:** Employs a dual-buffer architecture ($D_{form}$ and $D_{nav}$) to decouple conflicting phase objectives and utilizes phase-balanced sampling to mitigate catastrophic forgetting.
-* **Topological Awareness:** Integrates Graph Attention Networks (GATConv) for the real-time encoding of dynamically changing neighborhood topologies and obstacle risks.
-* **Residual Safety Guidance:** Incorporates an Artificial Potential Fields (APF) module that provides heuristic collision-avoidance guidance during both training and decentralized execution.
+PC-MAPPO: Phase-Conditioned Rollout Buffering for Multi-Robot Collaborative Motion Planning
+This repository contains the official implementation of the paper: "PC-MAPPO: Implementation and Empirical Evaluation of Phase-Conditioned Rollout Buffering for Multi-Robot Collaborative Motion Planning".
+Multi-robot collaborative tasks—like formation maintenance and safe navigation—often consist of sequential phases that create non-stationary task distributions. Traditional on-policy methods (like MAPPO) can suffer from distribution shifts when the rollout buffer is flooded with high-variance obstacle-avoidance data, degrading previously learned geometric formation behaviors.
+PC-MAPPO (Phase-Conditioned Multi-Agent Proximal Policy Optimization) addresses this practical tension. Instead of a single pooled buffer, this implementation uses separate phase-conditioned rollout buffers (Formation Establishment and Navigation/Avoidance). It performs batch-triggered updates using scheduled, phase-specific per-transition weights to coordinate learning without requiring exact phase-balanced sampling.
+Key Architecture Components
+Phase-Conditioned Rollout Buffering: Maintains separate buffers for formation and navigation data, assigning dynamic phase-dependent weights during PPO loss aggregation to mitigate gradient interference.
 
-* ## Repository Structure
-The codebase is organized into different simulation scenarios based on the experimental design in the paper:
-* (Obstacle-Free): Baseline formation convergence configuration for a 3-agent system[cite: 2].
-*  (Static Obstacles): Configuration for high-density environments with 3 static obstacles[cite: 2].
-* (Dynamic Obstacles): Non-stationary environment configuration featuring moving obstacles[cite: 2].
-*  (Square Formation): Code validating algorithmic scalability using a 4-agent square topology[cite: 2].
+Graph Attention Networks (GAT): Encodes scenario-specific interaction graphs (e.g., full connectivity or bidirectional nearest-neighbor) to capture dynamic relational representations among agents.
 
-## Requirements
-We recommend using Python 3.8 or higher. The primary dependencies include:
-* [Gymnasium](https://gymnasium.farama.org/) (for constructing the 2D continuous simulation space)[cite: 2]
-* PyTorch (core algorithm framework for GAT and MAPPO implementation)
-* NumPy / Pandas / SciPy (for trajectory data processing and state matrix operations)
-* Matplotlib (for visualizing learning curves and 2D motion trajectories)
+APF-Inspired Directional Guidance: A deterministic execution layer that smoothly blends target and repulsive directions, ensuring obstacle-aware navigation while the learned policy scales the displacement magnitude.
+Environments & Scenarios
+The framework utilizes a custom 2D continuous Multi-Agent Gymnasium environment ($1000 \times 1000$ simulation units). The state and reward structures are explicitly designed for Decentralized Partially Observable Markov Decision Processes (Dec-POMDPs) under a Centralized Training with Decentralized Execution (CTDE) paradigm.
+We provide multi-robot configurations (3-agent triangular and 4-agent square formations) across four increasing levels of complexity:
 
-## Quick Start
-1. Clone this repository to your local machine:
-   ```bash
-   git clone [https://github.com/hhqq233/PC-MAPPO-Phased-Curriculum-Learning-for-Multi-Robot-Collaborative-Motion-Planning.git](https://github.com/hhqq233/PC-MAPPO-Phased-Curriculum-Learning-for-Multi-Robot-Collaborative-Motion-Planning.git)
-   cd PC-MAPPO-Phased-Curriculum-Learning-for-Multi-Robot-Collaborative-Motion-Planning
+Obstacle-Free Formation: Baseline environment focusing on rapid swarm convergence to the target topology.
+
+Static Obstacle Fields: Includes 3, 5, or 7 static circular obstacles to introduce multi-objective conflict (formation vs. safety).
+
+Dynamic Environments: Non-stationary scenarios featuring multiple moving obstacles with distinct movement speeds and areas.
+
+Narrow Passage Constraints: Complex topological constraints using rotated rectangular obstacles that introduce opposing repulsive directions.
+nstallation
+
+Clone the repository and install the required dependencies:
+git clone https://github.com/hhqq233/PC-MAPPO-Phase-Conditioned-Rollout-Buffering.git
+cd PC-MAPPO-Phase-Conditioned-Rollout-Buffering
+
+# Create a virtual environment (optional but recommended)
+conda create -n pc-mappo python=3.9
+conda activate pc-mappo
+
+# Install dependencies
+pip install -r requirements.txt
+Usage
+
+Training
+
+To train the PC-MAPPO agents in a specific scenario, run the training script. The training process runs for 500,000 environment steps with updates triggered every 2048 transitions.
+# Example command (adjust based on your actual entrypoint script)
+python train.py --scenario static --num_agents 3 --num_obstacles 5
+Evaluation
+
+To evaluate the trained policies and render the formation trajectories (averaging over 50 episodes):
+python eval.py --scenario dynamic --num_agents 3 --load_model /path/to/model
