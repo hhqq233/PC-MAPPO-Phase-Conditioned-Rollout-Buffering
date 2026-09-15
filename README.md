@@ -1,44 +1,66 @@
-PC-MAPPO: Phase-Conditioned Rollout Buffering for Multi-Robot Collaborative Motion Planning
-This repository contains the official implementation of the paper: "PC-MAPPO: Implementation and Empirical Evaluation of Phase-Conditioned Rollout Buffering for Multi-Robot Collaborative Motion Planning".
-Multi-robot collaborative tasks—like formation maintenance and safe navigation—often consist of sequential phases that create non-stationary task distributions. Traditional on-policy methods (like MAPPO) can suffer from distribution shifts when the rollout buffer is flooded with high-variance obstacle-avoidance data, degrading previously learned geometric formation behaviors.
-PC-MAPPO (Phase-Conditioned Multi-Agent Proximal Policy Optimization) addresses this practical tension. Instead of a single pooled buffer, this implementation uses separate phase-conditioned rollout buffers (Formation Establishment and Navigation/Avoidance). It performs batch-triggered updates using scheduled, phase-specific per-transition weights to coordinate learning without requiring exact phase-balanced sampling.
-Key Architecture Components
-Phase-Conditioned Rollout Buffering: Maintains separate buffers for formation and navigation data, assigning dynamic phase-dependent weights during PPO loss aggregation to mitigate gradient interference.
+# PC-MAPPO: Phase-Conditioned Rollout Buffering for Multi-Robot Collaborative Motion Planning
 
-Graph Attention Networks (GAT): Encodes scenario-specific interaction graphs (e.g., full connectivity or bidirectional nearest-neighbor) to capture dynamic relational representations among agents.
+This repository contains the PC-MAPPO implementation associated with the manuscript *PC-MAPPO: Phase-Conditioned Rollout Buffering for Multi-Robot Collaborative Motion Planning*.
 
-APF-Inspired Directional Guidance: A deterministic execution layer that smoothly blends target and repulsive directions, ensuring obstacle-aware navigation while the learned policy scales the displacement magnitude.
-Environments & Scenarios
-The framework utilizes a custom 2D continuous Multi-Agent Gymnasium environment ($1000 \times 1000$ simulation units). The state and reward structures are explicitly designed for Decentralized Partially Observable Markov Decision Processes (Dec-POMDPs) under a Centralized Training with Decentralized Execution (CTDE) paradigm.
-We provide multi-robot configurations (3-agent triangular and 4-agent square formations) across four increasing levels of complexity:
+PC-MAPPO retains the MAPPO optimizer and organizes on-policy transitions in separate formation and navigation buffers. At an update, the phase datasets are concatenated and assigned phase-specific per-transition loss weights. The implementation also uses separate phase-wise GAE and advantage normalization, scenario-specific fixed-graph GAT encoding, and APF-inspired directional guidance for obstacle-aware execution.
 
-Obstacle-Free Formation: Baseline environment focusing on rapid swarm convergence to the target topology.
+## Scope and interpretation
 
-Static Obstacle Fields: Includes 3, 5, or 7 static circular obstacles to introduce multi-objective conflict (formation vs. safety).
+The phase coefficients in this implementation are per-transition loss weights, not exact phase-sampling proportions. Once formation has been reached, updates use effective weights of 0.5/0.5; therefore, any observed performance difference cannot be attributed to phase weighting alone. The phase-buffering ablation changes buffer organization, phase-wise GAE, advantage normalization, and loss weighting together, so it is a combined-implementation ablation rather than an isolated estimate of any single component.
 
-Dynamic Environments: Non-stationary scenarios featuring multiple moving obstacles with distinct movement speeds and areas.
+The GAT topology is scenario-specific and fixed during an episode; it is not dynamically rebuilt at each step. The current implementation may concatenate formation segments across episodes when the formation buffer does not receive a terminal flag, and it uses a zero next-state value at non-terminal batch truncation. These implementation details may affect advantage estimation near rollout boundaries.
 
-Narrow Passage Constraints: Complex topological constraints using rotated rectangular obstacles that introduce opposing repulsive directions.
-nstallation
+## Repository layout
 
-Clone the repository and install the required dependencies:
+- `obstacle-free/`: three-agent obstacle-free scenario.
+- `three-obstacles/`, `five obstacles/`, and `seven obstacles/`: three-agent static-obstacle scenarios.
+- `dynamic obstacles/`: moving-obstacle scenario.
+- `square-formation/`: four-agent square-formation scenarios.
+
+Each scenario directory contains:
+
+- `train_formation.py` for training.
+- `evaluate_formation.py` for evaluation.
+- `formation_env.py` for the environment definition.
+
+## Installation
+
+```bash
 git clone https://github.com/hhqq233/PC-MAPPO-Phase-Conditioned-Rollout-Buffering.git
 cd PC-MAPPO-Phase-Conditioned-Rollout-Buffering
-
-# Create a virtual environment (optional but recommended)
 conda create -n pc-mappo python=3.9
 conda activate pc-mappo
+```
 
-# Install dependencies
-pip install -r requirements.txt
-Usage
+This repository does not currently include a `requirements.txt`. Before running an experiment, install versions of the packages used by the selected scenario, including PyTorch, NumPy, Gymnasium, TensorBoard, and PyTorch Geometric, in an environment compatible with the local hardware and CUDA configuration.
 
-Training
+## Usage
 
-To train the PC-MAPPO agents in a specific scenario, run the training script. The training process runs for 500,000 environment steps with updates triggered every 2048 transitions.
-# Example command (adjust based on your actual entrypoint script)
-python train.py --scenario static --num_agents 3 --num_obstacles 5
-Evaluation
+Run commands from the relevant scenario directory:
 
-To evaluate the trained policies and render the formation trajectories (averaging over 50 episodes):
-python eval.py --scenario dynamic --num_agents 3 --load_model /path/to/model
+```bash
+cd "three-obstacles"
+python train_formation.py
+python evaluate_formation.py
+```
+
+For the obstacle-free scenario:
+
+```bash
+cd "obstacle-free"
+python train_formation.py
+python evaluate_formation.py
+```
+
+The training entry points are configured for 500,000 environment steps. The available evaluation entry points run 50 evaluation episodes. Evaluation requires a compatible trained checkpoint at the path expected by the selected scenario implementation; if model loading fails, do not interpret the output as an evaluation of a trained policy.
+
+## Materials still required from the authors
+
+The repository currently does not provide all materials required to reproduce every comparison reported in the manuscript. The following materials remain to be supplied:
+
+- Checkpoints corresponding to the reported evaluations, together with their paths and checksums.
+- Baseline implementations and configurations for MASAC, MADDPG, standard MAPPO, and all reported ablations.
+- Raw evaluation results, TensorBoard logs, and plotting scripts used to produce the manuscript figures and tables.
+- A versioned dependency file, such as `requirements.txt`, and a fixed release or tag corresponding to the submitted manuscript.
+
+Accordingly, this repository documents the PC-MAPPO implementation and scenario configurations, but does not currently provide a complete reproduction package for all manuscript results.
